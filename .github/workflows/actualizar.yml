@@ -5,7 +5,7 @@ on:
 
   schedule:
     # GitHub ejecuta el cron en UTC.
-    # El programa comprueba después la hora española.
+    # Después se comprueba la hora peninsular española.
     - cron: "8 * * * 1-5"
 
 permissions:
@@ -102,7 +102,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add rss.xml estado.json
+          git add feed.xml estado.json
 
           if git diff --cached --quiet; then
             echo "No hay cambios."
