@@ -4,8 +4,8 @@ on:
   workflow_dispatch:
 
   schedule:
-    # GitHub ejecuta el cron en UTC.
-    # Después se comprueba la hora peninsular española.
+    # GitHub utiliza UTC.
+    # El horario se comprueba después con la hora española.
     - cron: "8 * * * 1-5"
 
 permissions:
