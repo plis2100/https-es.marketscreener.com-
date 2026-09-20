@@ -4,8 +4,8 @@ on:
   workflow_dispatch:
 
   schedule:
-    # GitHub utiliza UTC.
-    # El horario se comprueba después con la hora española.
+    # Cada hora, de lunes a viernes.
+    # Python comprueba la hora peninsular española.
     - cron: "8 * * * 1-5"
 
 permissions:
@@ -18,7 +18,7 @@ concurrency:
 jobs:
   actualizar:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
 
     steps:
       - name: Descargar repositorio
@@ -94,7 +94,7 @@ jobs:
 
       - name: Crear RSS
         if: steps.horario.outputs.ejecutar == 'true'
-        run: python actualizar_rss.py
+        run: python -u actualizar_rss.py
 
       - name: Guardar RSS actualizada
         if: steps.horario.outputs.ejecutar == 'true'
