@@ -1,7 +1,7 @@
 import hashlib
 import json
 import re
-import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from email.utils import format_datetime
 from html import escape
@@ -15,10 +15,12 @@ from zoneinfo import ZoneInfo
 
 
 DOMINIO = "https://es.marketscreener.com"
+
 ARCHIVO_RSS = Path("feed.xml")
 ARCHIVO_ESTADO = Path("estado.json")
 
 MAX_NOTICIAS = 2500
+MAX_TRABAJADORES = 8
 
 
 SECCIONES = {
@@ -91,20 +93,8 @@ SECCIONES = {
     "Nuevos contratos":
         "https://es.marketscreener.com/noticias/empresa/nuevos-contratos/",
 
-    "Noticias de índices":
-        "https://es.marketscreener.com/bolsa/indices/noticias/",
-
-    "Noticias de divisas":
-        "https://es.marketscreener.com/bolsa/divisas/noticias/",
-
     "Materias primas":
         "https://es.marketscreener.com/noticias/materia-prima/",
-
-    "Criptomonedas":
-        "https://es.marketscreener.com/bolsa/criptomonedas/noticias/",
-
-    "ETF":
-        "https://es.marketscreener.com/bolsa/etf/noticias/",
 
     "Tipos de interés":
         "https://es.marketscreener.com/noticias/tasas/",
@@ -124,7 +114,19 @@ SECCIONES = {
     "Noticias influyentes":
         "https://es.marketscreener.com/trading/noticias-influyentes",
 
-    "Análisis":
+    "Noticias de índices":
+        "https://es.marketscreener.com/bolsa/indices/noticias/",
+
+    "Noticias de divisas":
+        "https://es.marketscreener.com/bolsa/divisas/noticias/",
+
+    "Noticias de criptomonedas":
+        "https://es.marketscreener.com/bolsa/criptomonedas/noticias/",
+
+    "Noticias de ETF":
+        "https://es.marketscreener.com/bolsa/etf/noticias/",
+
+    "Todos los análisis":
         "https://es.marketscreener.com/analisis/",
 
     "Artículos imprescindibles":
@@ -233,19 +235,19 @@ def normalizar_url(url):
     return url
 
 
-def es_noticia(url, titulo):
+def es_url_noticia(url, titulo):
     if not url or not titulo:
         return False
 
-    analizada = urlparse(url)
+    url_analizada = urlparse(url)
 
-    if analizada.netloc not in {
+    if url_analizada.netloc not in {
         "es.marketscreener.com",
         "www.marketscreener.com",
     }:
         return False
 
-    ruta = analizada.path.lower()
+    ruta = url_analizada.path.lower()
 
     if not (
         "/noticias/" in ruta
@@ -271,7 +273,7 @@ def es_noticia(url, titulo):
     return True
 
 
-def crear_id(url):
+def crear_identificador(url):
     return hashlib.sha256(
         url.encode("utf-8")
     ).hexdigest()
@@ -329,19 +331,19 @@ def obtener_fecha(texto):
     )
 
     if coincidencia_fecha:
-        nuevo_dia = int(
+        posible_dia = int(
             coincidencia_fecha.group(1)
         )
 
-        nuevo_mes = int(
+        posible_mes = int(
             coincidencia_fecha.group(2)
         )
 
-        if 1 <= nuevo_dia <= 31:
-            dia = nuevo_dia
+        if 1 <= posible_dia <= 31:
+            dia = posible_dia
 
-        if 1 <= nuevo_mes <= 12:
-            mes = nuevo_mes
+        if 1 <= posible_mes <= 12:
+            mes = posible_mes
 
         if coincidencia_fecha.group(3):
             texto_anio = coincidencia_fecha.group(3)
@@ -380,19 +382,16 @@ def obtener_fecha(texto):
         ).isoformat()
 
 
-def descargar_seccion(
-    sesion,
-    nombre,
-    url,
-):
+def descargar_seccion(nombre, url):
     print(
-        f"Descargando: {nombre}"
+        f"INICIO: {nombre}",
+        flush=True,
     )
 
-    respuesta = sesion.get(
+    respuesta = requests.get(
         url,
         impersonate="chrome",
-        timeout=45,
+        timeout=30,
         allow_redirects=True,
         headers={
             "Accept":
@@ -408,7 +407,8 @@ def descargar_seccion(
     )
 
     print(
-        f"Respuesta HTTP: {respuesta.status_code}"
+        f"HTTP {respuesta.status_code}: {nombre}",
+        flush=True,
     )
 
     if respuesta.status_code != 200:
@@ -422,7 +422,7 @@ def descargar_seccion(
     contenido = soup.find("main") or soup
 
     noticias = []
-    urls_encontradas = set()
+    urls_vistas = set()
 
     for enlace in contenido.find_all(
         "a",
@@ -447,13 +447,13 @@ def descargar_seccion(
             )
         )
 
-        if not es_noticia(
+        if not es_url_noticia(
             url_noticia,
             titulo,
         ):
             continue
 
-        if url_noticia in urls_encontradas:
+        if url_noticia in urls_vistas:
             continue
 
         bloque = obtener_bloque(
@@ -475,7 +475,7 @@ def descargar_seccion(
 
         noticias.append(
             {
-                "id": crear_id(
+                "id": crear_identificador(
                     url_noticia
                 ),
                 "titulo": titulo[:300],
@@ -488,78 +488,110 @@ def descargar_seccion(
             }
         )
 
-        urls_encontradas.add(
+        urls_vistas.add(
             url_noticia
         )
 
     print(
-        f"Noticias encontradas: {len(noticias)}"
+        f"FIN: {nombre} — {len(noticias)} noticias",
+        flush=True,
     )
 
     return noticias
 
 
 def descargar_todas_las_secciones():
-    sesion = requests.Session()
-
-    noticias = []
+    noticias_totales = []
     urls_vistas = set()
-    secciones_con_resultados = 0
+    errores = []
 
-    for nombre, url in SECCIONES.items():
-        try:
-            noticias_seccion = descargar_seccion(
-                sesion,
+    print(
+        f"Se descargarán {len(SECCIONES)} secciones "
+        f"con {MAX_TRABAJADORES} procesos simultáneos.",
+        flush=True,
+    )
+
+    with ThreadPoolExecutor(
+        max_workers=MAX_TRABAJADORES
+    ) as ejecutor:
+
+        tareas = {
+            ejecutor.submit(
+                descargar_seccion,
                 nombre,
                 url,
-            )
+            ): nombre
+            for nombre, url in SECCIONES.items()
+        }
 
-            if noticias_seccion:
-                secciones_con_resultados += 1
+        completadas = 0
 
-            for noticia in noticias_seccion:
-                url_noticia = noticia["url"]
+        for tarea in as_completed(tareas):
+            nombre = tareas[tarea]
+            completadas += 1
 
-                if url_noticia in urls_vistas:
-                    continue
+            try:
+                noticias_seccion = tarea.result()
 
-                noticias.append(
-                    noticia
+                for noticia in noticias_seccion:
+                    url_noticia = noticia["url"]
+
+                    if url_noticia in urls_vistas:
+                        continue
+
+                    noticias_totales.append(
+                        noticia
+                    )
+
+                    urls_vistas.add(
+                        url_noticia
+                    )
+
+            except Exception as error:
+                errores.append(
+                    f"{nombre}: {error}"
                 )
 
-                urls_vistas.add(
-                    url_noticia
+                print(
+                    f"ERROR: {nombre}: {error}",
+                    flush=True,
                 )
 
-            time.sleep(0.35)
-
-        except Exception as error:
             print(
-                f"Error en {nombre}: {error}"
+                f"PROGRESO: {completadas}/{len(SECCIONES)}",
+                flush=True,
             )
 
     print(
-        "Secciones con resultados:",
-        secciones_con_resultados,
+        f"Total de noticias únicas: "
+        f"{len(noticias_totales)}",
+        flush=True,
     )
 
     print(
-        "Total de noticias encontradas:",
-        len(noticias),
+        f"Secciones con error: {len(errores)}",
+        flush=True,
     )
 
-    if not noticias:
+    if errores:
+        for error in errores:
+            print(
+                error,
+                flush=True,
+            )
+
+    if not noticias_totales:
         raise RuntimeError(
             "No se encontró ninguna noticia "
             "en MarketScreener."
         )
 
-    noticias.sort(
+    noticias_totales.sort(
         key=lambda noticia: noticia["fecha"],
         reverse=True,
     )
 
-    return noticias
+    return noticias_totales
 
 
 def combinar_noticias(
@@ -756,6 +788,11 @@ def crear_feed(noticias):
 
 
 def main():
+    print(
+        "Comienza la actualización.",
+        flush=True,
+    )
+
     noticias_anteriores = cargar_estado()
 
     noticias_nuevas = descargar_todas_las_secciones()
@@ -774,13 +811,20 @@ def main():
     )
 
     print(
-        "Noticias encontradas ahora:",
-        len(noticias_nuevas),
+        f"Noticias encontradas ahora: "
+        f"{len(noticias_nuevas)}",
+        flush=True,
     )
 
     print(
-        "Noticias conservadas en feed.xml:",
-        len(noticias),
+        f"Noticias guardadas en feed.xml: "
+        f"{len(noticias)}",
+        flush=True,
+    )
+
+    print(
+        "Actualización terminada correctamente.",
+        flush=True,
     )
 
 
